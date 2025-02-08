@@ -1,1 +1,1 @@
-# Courses taken in IITH
+Courses I took in IITH
