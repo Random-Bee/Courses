@@ -1,0 +1,273 @@
+#Main File:
+
+Procedure updtMem(tid)
+    Define expDist with mean 1.0/lambda (exponential distribution)
+    status ← 0  // 0 for aborted, 1 for committed
+    abortCnt ← 0
+
+    For curTrans from 0 to numTrans - 1
+        status ← 0
+        abortCnt ← 0
+
+        t ← begin_trans()
+        startTime ← t.startTime
+        transId ← t.id
+
+        Repeat
+            randIters ← getRand(0, numIters)
+            
+            For i from 0 to randIters - 1
+                randInd ← getRand(0, m)
+                randVal ← getRand(0, constVal)
+
+                // Read value from index randInd into locVal
+                read(t, randInd, locVal)
+
+                currTime ← current time in nanoseconds
+                Log "Thread id {tid} Transaction id {transId} reads from {randInd} a value {locVal} at time {currTime}"
+
+                locVal ← locVal + randVal
+
+                // Request to write to the shared memory
+                write(t, randInd, locVal)
+
+                currTime ← current time in nanoseconds
+                // Log "Thread id {tid} Transaction id {transId} writes to {randInd} a value {locVal} at time {currTime}"
+
+                randTime ← expDist(rng)
+                Sleep for randTime milliseconds
+
+            status ← tryCommit(t)
+
+            currTime ← current time in nanoseconds
+            Log "Thread id {tid} Transaction id {transId} tryCommits with result {committed/aborted} at time {currTime}"
+
+            If status ≠ 1
+                abortCnt ← abortCnt + 1
+        Until status = 1
+
+        endTime ← current time in nanoseconds
+        timeTaken ← endTime - startTime
+    EndFor
+EndProcedure
+
+Procedure main()
+    f ← Open file "inp-params.txt" for reading
+    If f is NULL
+        Print "File not found"
+        Return
+
+    Read n, m, numTrans, numIters, constVal, lambda from file
+    Close file
+
+    initDatabase(m)
+
+    logFile ← Open "BOCC-log.txt" for writing
+
+    Create n threads
+    For i from 0 to n - 1
+        threads[i] ← Create thread(updtMem, i)
+    
+    For i from 0 to n - 1
+        threads[i].join()
+
+    Close logFile
+EndProcedure
+
+
+
+#BOCC header file:
+
+Import necessary libraries:
+    <bits/stdc++.h>
+    <semaphore.h>
+    
+Define namespace:
+    using namespace std
+    typedef long long ll
+
+Global declarations:
+    extern mt19937 rng
+    ll getRand(ll a, ll b)
+    extern FILE* logFile
+    void log(string s)
+
+Constants:
+    const ll INF = 1e9
+
+Class Database
+    Attributes:
+        arr: Array of size m+1
+        locks: Array of semaphores of size m+1
+        write_list: Array of sets of pairs <end time, start time>
+        activeTrans: Multiset of active transaction start times
+        activeLock: Semaphore for controlling access to activeTrans
+    Methods:
+        Procedure addActive(tid)
+        Procedure removeActive(tid)
+
+Class Transaction
+    Attributes:
+        id: Transaction ID
+        startTime: Start time of transaction
+        endTime: End time of transaction
+        readSet: Map of <index, value> for read operations
+        writeSet: Map of <index, value> for write operations
+    Methods:
+        Procedure init()
+
+Global functions:
+    Procedure initDatabase(m)
+    Transaction* begin_trans()
+    Procedure read(Transaction* t, ll index, ll& val)
+    Procedure write(Transaction* t, ll index, ll val)
+    bool tryCommit(Transaction* t)
+
+
+
+#BOCC Implementation file:
+
+Import "bocc.h"
+typedef long long ll
+
+Global:
+    db: Database instance
+
+Procedure Transaction::init()
+    startTime ← current time in nanoseconds
+    Clear readSet and writeSet
+    db.addActive(startTime)
+EndProcedure
+
+Procedure Database::addActive(startTime)
+    Acquire activeLock
+    Insert startTime into activeTrans
+    Release activeLock
+EndProcedure
+
+Procedure Database::removeActive(startTime)
+    Acquire activeLock
+    Erase startTime from activeTrans
+    Release activeLock
+EndProcedure
+
+// Random number generator
+Global:
+    rng ← Initialize random number generator with current time
+
+// Returns a random number in the range [a, b]
+Procedure getRand(a, b)
+    Return random number between a and b using uniform_int_distribution
+EndProcedure
+
+Global:
+    logFile: File pointer for logging
+    logLock: Semaphore for log file access
+
+// Writes log to file with thread safety
+Procedure log(s)
+    Acquire logLock
+    Write s to logFile
+    Release logLock
+EndProcedure
+
+// Initializes the database and semaphores
+Procedure initDatabase(m)
+    Resize db.arr to m+1
+    For i from 0 to m
+        db.arr[i] ← getRand(0, INF)
+
+    Resize db.locks to m+1
+    For i from 0 to m
+        Initialize db.locks[i] to 1
+
+    Resize db.write_list to m+1
+    Initialize activeLock and logLock
+EndProcedure
+
+// Atomic transaction ID counter
+Global:
+    id ← 0 (atomic)
+
+// Creates and initializes a new transaction
+Procedure begin_trans()
+    t ← New Transaction
+    tid ← Increment and fetch global id
+    t.id ← tid
+    t.init()
+    Return t
+EndProcedure
+
+// Reads value from index and adds to readSet or writeSet if modified
+Procedure read(t, index, val)
+    Acquire lock on db.locks[index]
+    If index in t.writeSet
+        val ← t.writeSet[index]
+    Else
+        val ← db.arr[index]
+        t.readSet[index] ← val
+    Release lock on db.locks[index]
+EndProcedure
+
+// Writes value to writeSet and updates readSet
+Procedure write(t, index, val)
+    t.readSet[index] ← val
+    t.writeSet[index] ← val
+EndProcedure
+
+// Garbage collection for committed transactions
+Procedure collectGarbage(combinedSet)
+    Acquire activeLock
+    minActiveTime ← Minimum value in activeTrans
+    For each index in combinedSet
+        toRemove ← []
+        For each (en, st) in db.write_list[index]
+            If en < minActiveTime
+                Add (en, st) to toRemove
+            Else
+                Break
+        EndFor
+        For each (en, st) in toRemove
+            Remove (en, st) from db.write_list[index]
+    EndFor
+    Release activeLock
+EndProcedure
+
+// Attempts to commit a transaction and handles conflicts
+Procedure tryCommit(t)
+    combinedSet ← Union of keys in readSet and writeSet
+    Acquire locks on all elements in combinedSet
+
+    // Check for conflicts with committed transactions
+    For each (ind, val) in t.readSet
+        cnt ← 0
+        For each (en, st) in db.write_list[ind]
+            If en ≥ t.startTime
+                cnt ← cnt + 1
+        EndFor
+        If cnt > 0
+            Release locks in combinedSet
+            db.removeActive(t.startTime)
+            t.init()
+            Return 0
+    EndFor
+
+    // No conflicts, perform commit
+    For each (ind, val) in t.writeSet
+        db.arr[ind] ← val
+        currTime ← current time in nanoseconds
+        Log "Transaction id {t.id} writes to {ind} a value {val} in database at time {currTime}"
+    EndFor
+
+    t.endTime ← current time in nanoseconds
+    For each (ind, val) in t.writeSet
+        Add (t.endTime, t.startTime) to db.write_list[ind]
+
+    db.removeActive(t.startTime)
+
+    collectGarbage(combinedSet)
+
+    Release locks in combinedSet
+    Delete t
+    Return 1
+EndProcedure

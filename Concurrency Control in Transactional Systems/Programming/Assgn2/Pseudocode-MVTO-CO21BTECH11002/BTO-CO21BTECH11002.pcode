@@ -1,0 +1,156 @@
+// Include required headers
+Include required headers (e.g., STL, semaphores)
+Use namespace std
+
+// Type aliases
+typedef long long ll
+
+// Global random number generator
+Initialize mt19937 rng with current time
+
+// Returns a random number in [a, b]
+Function getRand(a, b):
+    return random number between a and b using rng
+
+// Log file and lock
+Global FILE* logFile
+Global semaphore logLock
+
+// Logs the string s to the log file
+Function log(s):
+    Wait(logLock)
+    Write s to logFile
+    Post(logLock)
+
+const INF = 1e9
+
+// Class representing a data item
+Class Item:
+    Members:
+        read_ts: set of ll   // timestamps of transactions that read this item
+        max_w: ll            // max write timestamp
+        val: ll              // current value
+        lock: semaphore      // item-level lock
+
+    // Check if transaction with timeStamp can read
+    Function canRead(timeStamp):
+        return timeStamp >= max(read_ts)
+
+    // Check if transaction with timeStamp can write
+    Function canWrite(timeStamp):
+        return timeStamp >= max(max_w, max(read_ts))
+
+    // Read item and update read_ts
+    Function read(timeStamp, loc):
+        loc = val
+        read_ts.insert(timeStamp)
+
+    // Write value and update max_w
+    Function write(timeStamp, loc):
+        val = loc
+        max_w = timeStamp
+
+// Global vector of items (database)
+Global shared: vector of Item
+
+// Initialize the database with m data items
+Function initDatabase(m):
+    Resize shared to m+1 items
+    For i from 0 to m:
+        shared[i].val = getRand(0, INF)
+        Initialize shared[i].lock
+        shared[i].max_w = 0
+        shared[i].read_ts = {0}
+    Initialize logLock
+
+// Transaction class
+Class Transaction:
+    Members:
+        id: ll                   // transaction ID and timestamp
+        readSet: map<ll, ll>     // index → value read
+        writeSet: map<ll, ll>    // index → value to write
+
+// Atomic variable to generate transaction IDs
+Global atomic<ll> id = 1
+
+// Begins a new transaction
+Function begin_trans():
+    Create new Transaction t
+    t.id = id++
+    return t
+
+// Attempts to read index from database for transaction t
+Function read(t, index, locVal):
+    can_read = false
+    Wait(shared[index].lock)
+
+    // If the transaction has written to the data item, it should read the value it wrote
+    if index in t.writeSet:
+        locVal = t.writeSet[index]
+        can_read = true
+    
+    // Else, it should read the value from the database
+    else if shared[index].canRead(t.id):
+        shared[index].read(t.id, locVal)
+        can_read = true
+
+    // If the transaction has read the value, it should be added to the read set
+    if can_read:
+        t.readSet[index] = locVal
+
+    Post(shared[index].lock)
+    return can_read
+
+// Writes value to transaction's write set
+Function write(t, index, val):
+    t.writeSet[index] = val
+
+// Try to commit transaction t
+Function tryCommit(t, aborted):
+    // whether the transaction commits or aborts, it needs to acquire locks for both read and write sets
+    // since it needs to modify the read_ts set and write to the database. so acquire all locks first
+    combinedSet = union of indices in t.readSet and t.writeSet
+
+    For each ind in combinedSet:
+        Wait(shared[ind].lock)
+
+    // If aborted is true, then the transaction has aborted earlier (can be due to a late read) and it should not commit
+    If aborted:
+        // it should remove itself from the read_ts set of all the items it has read
+        For each ind in t.readSet:
+            shared[ind].read_ts.remove(t.id)
+        For each ind in combinedSet:
+            Post(shared[ind].lock)
+        Delete t
+        return false
+
+    can_commit = true
+    For each (ind, val) in t.writeSet:
+        can_commit &= shared[ind].canWrite(t.id)
+
+    If not can_commit:
+        For each ind in t.readSet:
+            shared[ind].read_ts.remove(t.id)
+        For each ind in combinedSet:
+            Post(shared[ind].lock)
+        Delete t
+        return false
+
+    // Apply writes
+    For each (ind, val) in t.writeSet:
+        shared[ind].write(t.id, val)
+        currTime = current time in nanoseconds
+        s = "Transaction id " + t.id + " writes to " + ind + " value " + val + " at " + currTime
+        log(s)
+
+    // Cleanup old timestamps in read_ts
+    For each (ind, _) in t.readSet:
+        toErase = all timestamps < t.id in shared[ind].read_ts
+        Remove all toErase from shared[ind].read_ts
+        Ensure t.id is in shared[ind].read_ts
+
+    For each ind in combinedSet:
+        Post(shared[ind].lock)
+
+    Delete t
+    return true

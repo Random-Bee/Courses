@@ -1,0 +1,239 @@
+#Main File:
+
+Procedure updtMem(tid)
+    Define expDist with mean 1.0/lambda (exponential distribution)
+    status ← 0  // 0 for aborted, 1 for committed
+    abortCnt ← 0
+
+    For curTrans from 0 to numTrans - 1
+        status ← 0
+        abortCnt ← 0
+
+        t ← begin_trans()
+        startTime ← t.startTime
+        transId ← t.id
+
+        Repeat
+            randIters ← getRand(0, numIters)
+            
+            For i from 0 to randIters - 1
+                randInd ← getRand(0, m)
+                randVal ← getRand(0, constVal)
+
+                // Read value from index randInd into locVal
+                read(t, randInd, locVal)
+
+                currTime ← current time in nanoseconds
+                Log "Thread id {tid} Transaction id {transId} reads from {randInd} a value {locVal} at time {currTime}"
+
+                locVal ← locVal + randVal
+
+                // Request to write to the shared memory
+                write(t, randInd, locVal)
+
+                currTime ← current time in nanoseconds
+                // Log "Thread id {tid} Transaction id {transId} writes to {randInd} a value {locVal} at time {currTime}"
+
+                randTime ← expDist(rng)
+                Sleep for randTime milliseconds
+
+            status ← tryCommit(t)
+
+            currTime ← current time in nanoseconds
+            Log "Thread id {tid} Transaction id {transId} tryCommits with result {committed/aborted} at time {currTime}"
+
+            If status ≠ 1
+                abortCnt ← abortCnt + 1
+        Until status = 1
+
+        endTime ← current time in nanoseconds
+        timeTaken ← endTime - startTime
+    EndFor
+EndProcedure
+
+Procedure main()
+    f ← Open file "inp-params.txt" for reading
+    If f is NULL
+        Print "File not found"
+        Return
+
+    Read n, m, numTrans, numIters, constVal, lambda from file
+    Close file
+
+    initDatabase(m)
+
+    logFile ← Open "FOCC-log.txt" for writing
+
+    Create n threads
+    For i from 0 to n - 1
+        threads[i] ← Create thread(updtMem, i)
+    
+    For i from 0 to n - 1
+        threads[i].join()
+
+    Close logFile
+EndProcedure
+
+
+#FOCC header file:
+
+Import necessary libraries:
+    <bits/stdc++.h>
+    <semaphore.h>
+
+Define namespace:
+    using namespace std
+    typedef long long ll
+
+Global declarations:
+    extern mt19937 rng
+    ll getRand(ll a, ll b)
+    extern FILE* logFile
+    void log(string s)
+
+Constants:
+    const ll INF = 1e9
+
+Class Database
+    Attributes:
+        arr: Array of size m+1
+        locks: Array of semaphores of size m+1
+        read_list: Array of sets storing active transaction IDs that read each item
+    Methods:
+        Procedure addActive(ll tid)
+        Procedure removeActive(ll tid)
+
+Procedure initDatabase(ll n)
+
+Class Transaction
+    Attributes:
+        id: Transaction ID
+        startTime: Start time of transaction
+        readSet: Map of <index, value> for read operations
+        writeSet: Map of <index, value> for write operations
+    Methods:
+        Procedure init()
+
+Global functions:
+    Transaction* begin_trans()
+    Procedure read(Transaction* t, ll index, ll& val)
+    Procedure write(Transaction* t, ll index, ll val)
+    bool tryCommit(Transaction* t)
+
+
+
+# FOCC Implementation file:
+
+Import "focc.h"
+typedef long long ll
+
+// Random number generator
+Global:
+    rng ← Initialize random number generator with current time
+
+// Returns a random number in the range [a, b]
+Procedure getRand(a, b)
+    Return random number between a and b using uniform_int_distribution
+EndProcedure
+
+Global:
+    logFile: File pointer for logging
+    logLock: Semaphore for log file access
+
+// Writes log to file with thread safety
+Procedure log(s)
+    Acquire logLock
+    Write s to logFile
+    Release logLock
+EndProcedure
+
+Global:
+    db: Database instance
+
+// Initializes the database and semaphores
+Procedure initDatabase(m)
+    Resize db.arr to m+1
+    For i from 0 to m
+        db.arr[i] ← getRand(0, INF)
+
+    Resize db.locks to m+1
+    For i from 0 to m
+        Initialize db.locks[i] to 1
+
+    Resize db.read_list to m+1
+    Initialize logLock
+EndProcedure
+
+// Atomic transaction ID counter
+Global:
+    id ← 0 (atomic)
+
+// Creates and initializes a new transaction
+Procedure begin_trans()
+    t ← New Transaction
+    tid ← Increment and fetch global id
+    t.id ← tid
+    t.init()
+    Return t
+EndProcedure
+
+// Initializes a transaction
+Procedure Transaction::init()
+    startTime ← current time in nanoseconds
+    Clear readSet and writeSet
+EndProcedure
+
+// Reads value from index and adds to readSet or writeSet if modified
+Procedure read(t, index, val)
+    Acquire lock on db.locks[index]
+    If index in t.writeSet
+        val ← t.writeSet[index]
+    Else
+        val ← db.arr[index]
+        t.readSet[index] ← val
+    EndIf
+    Add t.id to db.read_list[index]
+    Release lock on db.locks[index]
+EndProcedure
+
+// Writes value to writeSet and updates readSet
+Procedure write(t, index, val)
+    t.readSet[index] ← val
+    t.writeSet[index] ← val
+EndProcedure
+
+// Attempts to commit a transaction and handles conflicts
+Procedure tryCommit(t)
+    combinedSet ← Union of keys in readSet and writeSet
+    Acquire locks on all elements in combinedSet
+
+    // Check for conflicts with other active transactions
+    For each (ind, val) in t.writeSet
+        Remove t.id from db.read_list[ind]
+        If size of db.read_list[ind] > 0
+            // Remove itself from read list in case of abort
+            For each (index, _) in t.readSet
+                Remove t.id from db.read_list[index]
+            Release locks in combinedSet
+            EndFor
+            t.init()
+            Return 0
+        EndIf
+    EndFor
+
+    // No conflicts, perform commit
+    For each (ind, val) in t.writeSet
+        db.arr[ind] ← val
+        currTime ← current time in nanoseconds
+        Log "Transaction id {t.id} writes to {ind} a value {val} in database at time {currTime}"
+    EndFor
+
+    // Remove itself from read list after commit
+    For each (index, _) in t.readSet
+        Remove t.id from db.read_list[index]
+    EndFor
+
+    Release locks in combinedSet
+    Delete t
+    Return 1
+EndProcedure

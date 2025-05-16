@@ -1,0 +1,164 @@
+// Include required headers
+Include required headers (e.g., STL, semaphores)
+Use namespace std
+
+// Type aliases
+typedef long long ll
+
+// Global random number generator
+Initialize mt19937 rng with current time
+
+// Returns a random number in [a, b]
+Function getRand(a, b):
+    return random number between a and b using rng
+
+// Log file and lock
+Global FILE* logFile
+Global semaphore logLock
+
+// Logs the string s to the log file
+Function log(s):
+    Wait(logLock)
+    Write s to logFile
+    Post(logLock)
+
+const INF = 1e9
+
+// Bound on the number of versions
+ll K
+
+// Class representing a data item
+class Item:
+    // map of transaction id to the pair of value it wrote and the set of transaction ids that have read this version (read_list of this version)
+    versions: map of (ll → (ll, set of ll))
+    lock: binary semaphore
+
+    function canRead(timeStamp):
+        // a version with timestamp ≤ current timestamp should exist
+        return timeStamp ≥ minimum timestamp in versions
+
+    function canWrite(timeStamp):
+        // Two conditions:
+        // 1. Same as canRead
+        if timeStamp < minimum timestamp in versions:
+            return false
+
+        // 2. timeStamp must not be between any writer and reader of a version
+        version = latest version with timestamp < timeStamp
+        max_reader_ts = maximum of version.read_list (or 0 if empty)
+        return NOT (version.timestamp < timeStamp < max_reader_ts)
+
+    function read(timeStamp, loc):
+        // Read version ≤ timeStamp
+        version = latest version with timestamp ≤ timeStamp
+        loc = version.value
+        add timeStamp to version.read_list
+
+    function write(timeStamp, value):
+        newVersion = (value, empty set)  // a new version with value and empty read_list
+
+        if size of versions < K:
+            versions[timeStamp] = newVersion  // just add the new version
+        else:
+            oldest = versions.begin()  // get the oldest version (smallest timestamp)
+            delete versions[oldest.timestamp]  // remove the oldest version
+            versions[timeStamp] = newVersion  // insert the new version
+
+// Global vector of items (database)
+global shared: list of Item
+
+// Initialize the database with m data items
+function initDatabase(m):
+    resize shared to size m+1
+    for i from 0 to m:
+        shared[i].versions[0] = (getRand(0, INF), empty set)
+        initialize shared[i].lock as a binary semaphore
+    initialize logLock
+
+// Transaction class
+Class Transaction:
+    Members:
+        id: ll                   // transaction ID and timestamp
+        readSet: map<ll, ll>     // index → value read
+        writeSet: map<ll, ll>    // index → value to write
+
+// Atomic variable to generate transaction IDs
+global atomic id = 1
+
+// Begins a new transaction
+function begin_trans():
+    t = new Transaction
+    t.id = atomic_increment(id)
+    return t
+
+// Attempts to read index from database for transaction t
+function read(t, index, locVal):
+    can_read = false
+    Wait(shared[index].lock)
+
+    // If the transaction has written to the data item, it should read the value it wrote
+    if index in t.writeSet:
+        locVal = t.writeSet[index]
+        can_read = true
+
+    // Else, it should read the value from the database
+    else:
+        can_read = shared[index].canRead(t.id)
+        if can_read:
+            shared[index].read(t.id, locVal)
+
+    // If the transaction has read the value, it should be added to the read set
+    if can_read:
+        t.readSet[index] = locVal
+    
+    Post(shared[index].lock)
+    return can_read
+
+
+// Writes value to transaction's write set
+function write(t, index, val):
+    t.writeSet[index] = val
+
+// Try to commit transaction t
+function tryCommit(t, aborted):
+    // whether the transaction commits or aborts, it needs to acquire locks for both read and write sets
+    // since it needs to modify the read_ts set and write to the database. so acquire all locks first
+    combinedSet = union of keys in t.readSet and t.writeSet
+    acquire locks for all items in combinedSet
+
+    // If aborted is true, then the transaction has aborted earlier (can be due to a late read) and it should not commit
+    if aborted:
+        // it should remove itself from the read_list of the version of all the items it has read
+        for (index, _) in t.readSet:
+            // it is possible that version points to some other transaction's version if the required version was removed due to K
+            // in that case, tid will not be present in the read_list of the version
+            // however, it is safe to call erase on the set, since it will not do anything if the element is not present
+            version = latest version with timestamp ≤ t.id in shared[index]
+            remove t.id from version.read_list
+        release all locks in combinedSet
+        delete t
+        return false
+
+    // if any of the items in the write set cannot be written to, then the transaction should abort
+    can_commit = true
+    for (index, _) in t.writeSet:
+        can_commit = can_commit AND shared[index].canWrite(t.id)
+
+    if NOT can_commit:
+        // it should remove itself from the read_list of the version of all the items it has read
+        for (index, _) in t.readSet:
+            version = latest version with timestamp ≤ t.id in shared[index]
+            remove t.id from version.read_list
+        release all locks in combinedSet
+        delete t
+        return false
+
+    // Commit: write to database
+    for (index, val) in t.writeSet:
+        shared[index].write(t.id, val)
+        current_time = current system time in nanoseconds
+        log("Transaction id " + t.id + " writes to " + index + " a value " + val + " in database at time " + current_time)
+
+    release all locks in combinedSet
+    delete t
+    return true
